@@ -903,8 +903,10 @@ check_expr(['if'|B], Env, L, St) ->
     check_if(B, Env, L, St);
 check_expr(['case'|B], Env, L, St) ->
     check_case(B, Env, L, St);
+check_expr(['maybe'|B], Env, L, St) ->
+    check_maybe(B, Env, L, St);
 check_expr(['receive'|Cls], Env, L, St) ->
-    check_rec_clauses(Cls, Env, L, St);
+    check_receive(Cls, Env, L, St);
 check_expr(['catch'|B], Env, L, St) ->
     check_body('catch', B, Env, L, St);
 check_expr(['try'|B], Env, L, St) ->
@@ -1287,7 +1289,13 @@ check_ml_clauses(Cls, Ar, Env, L, St) ->
 %%  Check let variable bindings and then body. Must be careful to use
 %%  correct bindings.
 
-check_let([Vbs|Body], Env, L, St0) ->
+check_let([Vbs|Body], Env0, L, St0) ->
+    {Env1,St1} = check_let_vbs(Vbs, Env0, L, St0),
+    check_body('let', Body, Env1, L, St1);
+check_let(_, _, L, St) ->
+    bad_form_error(L, 'let', St).
+
+check_let_vbs(Vbs, Env, L, St0) ->
     Check = fun (Vb, Pvs, Sta) ->
                     {Pv,Stb} = check_let_vb(Vb, Env, L, Sta),
                     Stc = case ordsets:intersection(Pv, Pvs) of
@@ -1297,9 +1305,7 @@ check_let([Vbs|Body], Env, L, St0) ->
                     {ordsets:union(Pv, Pvs), Stc}
             end,
     {Pvs,St1} = foldl_form(Check, 'let', L, [], St0, Vbs),
-    check_body('let', Body, le_addvs(Pvs, Env), L, St1);
-check_let(_, _, L, St) ->
-    bad_form_error(L, 'let', St).
+    {le_addvs(Pvs, Env),St1}.
 
 %% check_let_vb(VarBind, Env, Line, State) -> {Env,State}.
 %%  Check a variable binding of form [Pat,[when,Guard],Val] or
@@ -1429,6 +1435,46 @@ check_case(_, _, L, St) ->
 check_case_clauses(Cls, Env, L, St) ->
     foreach_form(fun (Cl, S) -> check_clause('case', Cl, Env, L, S) end,
                  'case', L, St, Cls).
+
+%% check_maybe(MaybeBody, Env, Line, State) -> State.
+%%  Check the maybe body. We don't allow guards in the ?= forms as
+%%  yet.
+
+check_maybe(Body, Env, L, St) ->
+    check_maybe_exprs(Body, Env, L, St).
+
+%% check_maybe_exprs([['?='|Test]|Es], Env0, L, St0) ->
+check_maybe_exprs([['?=',Pat,Body]|Es], Env0, L, St0) ->
+    Test = [Pat,Body],
+    %% Get the environments right here!
+    {Env1,St1} = case pattern_guard(Test, Env0, L, St0) of
+		     {[Val],_,E,S} ->
+			 %% One value expression only
+			 {E,check_expr(Val, Env0, L, S)};
+		     {_,_,E,S} ->
+			 {E,bad_form_error(L, 'maybe', S)}
+		 end,
+    check_maybe_exprs(Es, Env1, L, St1);
+check_maybe_exprs([['let',Vbs|Body]|Es], Env0, L, St0) ->
+    {Env1,St1} = check_let_vbs(Vbs, Env0, L, St0),
+    St2 = check_maybe_exprs(Body, Env1, L, St1),
+    check_maybe_exprs(Es, Env0, L, St2);
+check_maybe_exprs(['else'|Cls], Env, L, St) ->
+    check_maybe_else(Cls, Env, L, St);
+check_maybe_exprs([E|Es], Env, L, St0) ->
+    St1 = check_expr(E, Env, L, St0),
+    check_maybe_exprs(Es, Env, L, St1);
+check_maybe_exprs([], _Env, _L, St) -> St.
+
+check_maybe_else(Cls, Env, L, St) ->
+    foreach_form(fun (Cl, S) -> check_clause('maybe', Cl, Env, L, S) end,
+		 'maybe', L, St, Cls).
+
+%% check_receive(Clauses, Env, Line, State) -> State.
+%%  Check the receive.
+
+check_receive(Cls, Env, L, St) ->
+    check_rec_clauses(Cls, Env, L, St).
 
 check_rec_clauses([['after',T|B]], Env, L, St0) ->
     St1 = check_expr(T, Env, L, St0),

@@ -138,6 +138,10 @@ from_expr({'case',_,E,Cls}, Vt0, St0) ->
     {Le,Vt1,St1} = from_expr(E, Vt0, St0),
     {Lcls,Vt2,St2} = from_icrt_cls(Cls, Vt1, St1),
     {['case',Le|Lcls],Vt2,St2};
+from_expr({'maybe',_,Body}, Vt, St) ->
+    from_maybe(Body, none, Vt, St);
+from_expr({'maybe',_,Body,Else}, Vt, St) ->
+    from_maybe(Body, Else, Vt, St);
 from_expr({'receive',_,Cls}, Vt0, St0) ->
     {Lcls,Vt1,St1} = from_icrt_cls(Cls, Vt0, St0),
     {['receive'|Lcls],Vt1,St1};
@@ -204,13 +208,43 @@ from_body([], Vt, St) -> {[],Vt,St}.
 from_expr_list(Es, Vt, St) ->
     mapfoldl2(fun from_expr/3, Vt, St, Es).
 
-%% from_block(Body, VarTable, State) -> {Block,State}.
+%% from_block(Body, VarTable, State) -> {Block,VarTable,State}.
 
 from_block(Es, Vt0, St0) ->
     case from_body(Es, Vt0, St0) of
         {[Le],Vt1,St1} -> {Le,Vt1,St1};
         {Les,Vt1,St1} -> {[progn|Les],Vt1,St1}
     end.
+
+%% from_maybe(Body, Else, VarTable, State) -> {Maybe,VarTable,State)
+
+from_maybe(Body, Else, Vt0, St0) ->
+    {Lb,Vt1,St1} = from_maybe_body(Body, Vt0, St0),
+    {Le,Vt2,St2} = from_maybe_else(Else, Vt1, St1),
+    {['maybe' | Lb ++ Le], Vt2, St2}.
+
+from_maybe_body([{'maybe_match',_L,Ep,Ee}|Es], Vt0, St0) ->
+    {Le,Vt1,St1} = from_expr(Ee, Vt0, St0),
+    {Lp,[],Vt2,St2} = from_pat(Ep, Vt1, St1),
+    Lmm = ['?=',Lp,Le],
+    {Les,Vt3,St3} = from_maybe_body(Es, Vt2, St2),
+    {[Lmm | Les],Vt3,St3};
+from_maybe_body([{match,_L,Ep,Ee}|Es], Vt0, St0) ->
+    {Le,Vt1,St1} = from_expr(Ee, Vt0, St0),
+    {Lp,[],Vt2,St2} = from_pat(Ep, Vt1, St1),
+    {Les,Vt3,St3} = from_maybe_body(Es, Vt2, St2),
+    {[['let',[[Lp,Le]]|Les]],Vt3,St3};
+from_maybe_body([E|Es], Vt0, St0) ->
+    {Le,Vt1,St1} = from_expr(E, Vt0, St0),
+    {Les,Vt2,St2} = from_maybe_body(Es, Vt1, St1),
+    {[Le | Les],Vt2,St2};
+from_maybe_body([], Vt, St) -> {[],Vt,St}.
+
+from_maybe_else(none, Vt, St) ->
+    {[],Vt,St};
+from_maybe_else({'else',_,Ecls}, Vt0, St0) ->
+    {Lcls,Vt1,St1} = from_icrt_cls(Ecls, Vt0, St0),
+    {['else' | Lcls],Vt1,St1}.
 
 %% from_add_guard(GuardTests, Body) -> Body.
 %%  Only prefix with a guard when there are tests.
@@ -395,12 +429,12 @@ from_try(Es, Scs, Ccs, As, Vt, St0) ->
                    end,
     {Las,_,St4} = from_body(As, Vt, St3),
     {['try',[progn|Les]|
-      from_maybe('case', Lscs) ++
-          from_maybe('catch', Lccs) ++
-          from_maybe('after', Las)],Vt,St4}.
+      from_try_maybe('case', Lscs) ++
+          from_try_maybe('catch', Lccs) ++
+          from_try_maybe('after', Las)],Vt,St4}.
 
-from_maybe(_, []) -> [];
-from_maybe(Tag, Es) -> [[Tag|Es]].
+from_try_maybe(_, []) -> [];
+from_try_maybe(Tag, Es) -> [[Tag|Es]].
 
 %% from_list_comp(Expr, Qualifiers, VarTable, State) -> {Listcomp,State}.
 
@@ -811,6 +845,8 @@ to_expr(['if'|Body], L, Vt, St) ->
     to_if(Body, L, Vt, St);
 to_expr(['case'|Body], L, Vt, St) ->
     to_case(Body, L, Vt, St);
+to_expr(['maybe'|Body], L, Vt, St) ->
+    to_maybe(Body, L, Vt, St);
 to_expr(['receive'|Cls], L, Vt, St) ->
     to_receive(Cls, L, Vt, St);
 to_expr(['catch'|B], L, Vt, St0) ->
@@ -1180,6 +1216,196 @@ to_case([E|Cls], L, Vt, St0) ->
     {{'case',L,Ee,Ecls},St2};
 to_case(_, L, _, _) ->
     illegal_code_error(L, 'case').
+
+%% to_maybe(MaybeBody, LineNumber, VarTable, State) -> {ErlMaybe,State}.
+%%  We have 2 different versions here depending on which version of
+%%  Erlang we are using. If is OTP 27 or later we transform to use the
+%%  maybe instructions in the AST, while if it older we transform to a
+%%  sequence of let and case on which we then just do a normal
+%%  tranformation.
+
+-ifdef(OTP27_MAYBE).
+
+to_maybe(Body, L, Vt, St0) ->
+    {Eb,St1} = to_maybe_body(Body, L, Vt, St0),
+    {Ee,St2} = to_maybe_else(Body, L, Vt, St1),
+    Emb = if Ee =:= [] -> {'maybe',L,Eb};
+             Ee =/= [] -> {'maybe',L,Eb,{'else',L,Ee}}
+          end,
+    {Emb,St2}.
+
+to_maybe_body(['else'|_Es], _L, _Vt, St) ->
+    %% Already done else elsewhere.
+    {[],St};
+to_maybe_body([['?=',Pat,E]|Mes], L, Vt0, St0) ->
+    {Ee,St1} = to_expr(E, L, Vt0, St0),
+    {Ep,Vt1,St2} = to_pat(Pat, L, Vt0, St1),
+    {Emes,St3} = to_maybe_body(Mes, L, Vt1, St2),
+    {[{maybe_match,L,Ep,Ee} | Emes],St3};
+to_maybe_body([['let',Bindings|Body]|Mes], L, Vt, St0) ->
+    {Elet,St1} = to_maybe_let(Bindings, Body, L, Vt, St0),
+    {Emes,St2} = to_maybe_body(Mes, L, Vt, St1),
+    {Elet ++ Emes,St2};
+to_maybe_body([Me|Mes], L, Vt, St0) ->
+    {Eme,St1} = to_expr(Me, L, Vt, St0),
+    {Emes,St2} = to_maybe_body(Mes, L, Vt, St1),
+    {[Eme|Emes],St2};
+to_maybe_body([], _L, _Vt, St) ->
+    {[],St}.
+
+to_maybe_else(Es, L, Vt, St) ->
+    case lists:dropwhile(fun (X) -> X =/= 'else' end, Es) of
+        [] -> {[],St};
+        ['else'|Cls] ->
+            to_icr_cls(Cls, L, Vt, St)
+    end.
+
+%% to_maybe_let(Bindings, Block, LineNumber, VarTable, State) -> {Let,State}.
+%%  Note that the value expressions for the bindings all use the
+%%  variable values from before the let whereas the let body uses the
+%%  of the created bindings.
+
+to_maybe_let(Lbs0, B, L, Vt0, St0) ->
+    {Elbs,Vt1,St1} = to_maybe_let_bindings(Lbs0, L, Vt0, Vt0, St0),
+    {Eb,St2} = to_maybe_body(B, L, Vt1, St1),
+    {Elbs ++ Eb,St2}.
+
+to_maybe_let_bindings([[P,['when'],E]|Lbs], L, Lvt, Vt, St) ->
+    to_maybe_let_bindings([[P,E]|Lbs], L, Lvt, Vt, St);
+to_maybe_let_bindings([['when'|G]|Lbs], L, Lvt, Vt0, St0) ->
+    %% {Eg,St1} = to_guard(G, L, Vt0, St0),
+    %% Gt = case G of
+    %% 	[T] -> T;
+    %% 	[T|Ts] ->
+    %% 	    lists:foldr(fun (T, Acc) -> ['and',T,Acc] end, T, Ts)
+    %% end,
+    Gt = lists:foldr(fun (T, Acc) -> ['and',T,Acc] end, ?Q(true), G),
+    io:format("grd ~p\n", [{G,Gt}]),
+    {Eg,St1} = to_expr(Gt, L, Vt0, St0),
+    Guard = {match,L,to_lit(true, L),Eg},
+    {Ematches,Vt1,St2} = to_maybe_let_bindings(Lbs, L, Lvt, Vt0, St1),
+    {[Guard | Ematches],Vt1,St2};
+to_maybe_let_bindings([[P,G,E]|Lbs], L, Lvt, Vt, St) ->
+    %% We match against both the pattern and the value so we can
+    %% return the value without rebuilding it. We need to match twice
+    %% so we can opull the pattern apart at the top level as well to
+    %% get the bindings.
+    Case = ['case',E,
+            [['=',P,'-pat-'],G,'-pat-'],
+            ['-maybe-other-',[error,[tuple,?Q(badmatch),'-maybe-other-']]]],
+    to_maybe_let_bindings([[P,Case]|Lbs], L, Lvt, Vt, St);
+    %% to_maybe_let_bindings([[P,E],G|Lbs], L, Lvt, Vt, St);
+to_maybe_let_bindings([[P,E]|Lbs], L, Lvt, Vt0, St0) ->
+    {Ematch,Vt1,St1} = to_maybe_let_binding(P, E, L, Lvt, Vt0, St0),
+    {Ematchs,Vt2,St2} = to_maybe_let_bindings(Lbs, L, Lvt, Vt1, St1),
+    {[Ematch|Ematchs],Vt2,St2};
+to_maybe_let_bindings([], _L, _Lvt, Vt, St) ->
+    {[],Vt,St}.
+
+to_maybe_let_binding(P, E, L, Lvt, Vt0, St0) ->
+    {Ee,St1} = to_expr(E, L, Lvt, St0),
+    {Ep,Vt1,St2} = to_pat(P, L, Vt0, St1),
+    {{match,L,Ep,Ee},Vt1,St2}.
+
+%% to_maybe_let(Lbs, B, L, Vt0, St0) ->
+%%     io:format("mlb ~p\n", [to_mlb(Lbs)]),
+%%     {Elbs,Vt1,St1} = to_maybe_let_bindings(Lbs, L, Vt0, St0),
+%%     {Eb,St2} = to_maybe_body(B, L, Vt1, St1),
+%%     {Elbs ++ Eb,St2}.
+    %% {Elbs,_Vt1,St1} = to_maybe_let_bindings(Lbs, B, L, Vt0, St0),
+    %% {Elbs,St1}.
+    %% {Eb,St2} = to_maybe_body(B, L, Vt1, St1),
+    %% {Elbs ++ Eb,St2}.
+
+%% to_maybe_let_bindings([[P,E]|Lbs], L, Vt0, St0) ->
+%%     {Ee,St1} = to_expr(E, L, Vt0, St0),
+%%     {Ep,Vt1,St2} = to_pat(P, L, Vt0, St1),
+%%     {Elbs,Vt2,St3} = to_maybe_let_bindings(Lbs, L, Vt1, St2),
+%%     {[{match,L,Ep,Ee}|Elbs],Vt2,St3};
+%% to_maybe_let_bindings([[P,['when'],E]|Lbs], L, Vt, St) ->
+%%     %% Explicitly skip empty guards and get better code.
+%%     to_maybe_let_bindings([[P,E]|Lbs], L, Vt, St);
+%% to_maybe_let_bindings([[P,['when'|G],E]|Lbs], L, Vt0, St0) ->
+%%     %% This is a bit tricky as we need maybe_match at the top level so
+%%     %% we can't allow it in the generated case.
+%%     CaseBody = [E,
+%%                 [['=',P,'-pat-'],['when'|G],'-pat-'],
+%%                 ['-other-',[error,[tuple,?Q(badmatch),'-other-']]]],
+%%     {Ecase,St1} = to_case(CaseBody, L, Vt0, St0),
+%%     {Emp,Vt1,St2} = to_pat(P, L, Vt0, St1),     %The match pattern
+%%     {Elbs,Vt3,St3} = to_maybe_let_bindings(Lbs, L, Vt1, St2),
+%%     {[{match,L,Emp,Ecase}|Elbs],Vt3,St3};
+%% to_maybe_let_bindings([], _L, Vt, St) ->
+%%     {[],Vt,St}.
+%%     %% {Eb,St1} = to_maybe_body(B, L, Vt, St0),
+%%     %% {Eb,Vt,St1}.
+
+%% to_maybe_let_bindings([[P,E]|Lbs], L, Vt0, St0) ->
+%%     {Ee,St1} = to_expr(E, L, Vt0, St0),
+%%     {Ep,Vt1,St2} = to_pat(P, L, Vt0, St1),
+%%     {Elbs,Vt2,St3} = to_maybe_let_bindings(Lbs, L, Vt1, St2),
+%%     {[{match,L,Ep,Ee}|Elbs],Vt2,St3};
+%% to_maybe_let_bindings([[P,['when'],E]|Lbs], L, Vt, St) ->
+%%     %% Skip empty guards.
+%%     to_maybe_let_bindings([[P,E]|Lbs], L, Vt, St);
+%% to_maybe_let_bindings([[P,['when'|G],E]|Lbs], L, Vt0, St0) ->
+%%     %% Need to build a case here.
+%%     {Ee,St1} = to_expr(E, L, Vt0, St0),
+%%     {Ep,Vt1,St2} = to_pat(P, L, Vt0, St1),
+%%     {Eg,St3} = to_guard(G, L, Vt1, St2),
+%%     {BadMatch,St4} = to_let_binding_error(L, St3),
+%%     {Elbs,Vt2,St5} = to_maybe_let_bindings(Lbs, L, Vt1, St4),
+%%     Case = {'case',L,Ee,[{clause,L,[Ep],[Eg],Elbs},BadMatch]},
+%%     {[Case],Vt2,St5};
+%% to_maybe_let_bindings([], _L, Vt, St) ->
+%%     {[],Vt,St}.
+
+-else.
+
+to_maybe(Body, L, Vt, St) ->
+    Else = to_maybe_else(Body),
+    Case = ['let',[['-else-',Else]],
+            ['progn' | to_maybe_body(Body)]],
+    to_expr(Case, L, Vt, St).
+
+to_maybe_body(['else'|_Mes]) ->
+    %% Already done else elsewhere.
+    [];
+%% to_maybe_body([['?=',Pat,G,E]|Mes]) ->
+%%     [['case',E,
+%%       [Pat,G,['progn' | to_maybe_body(Mes)]],
+%%       ['other',['funcall','-else-','other']]]];
+to_maybe_body([['?=',Pat,E]|Mes]) ->
+    [['case',E,
+      [Pat,['progn' | to_maybe_body(Mes)]],
+      ['other',['funcall','-else-','other']]]];
+to_maybe_body([['let',Bindings|Body]|Mes]) ->
+    [['let',Bindings | to_maybe_body(Body)] | to_maybe_body(Mes)];
+to_maybe_body([Me|Mes]) ->
+    [Me | to_maybe_body(Mes)];
+to_maybe_body([]) -> [].
+
+to_maybe_else(Mes) ->
+    case lists:dropwhile(fun (X) -> X =/= 'else' end, Mes) of
+        [] -> ['lambda',[x],x];
+        ['else'|Ts] ->
+            Cls = lists:foldr(fun ([Pat|Body], Acc) -> [[[Pat]|Body] | Acc] end,
+                              [[['-maybe-other-'],
+				[error,[tuple,?Q(else_clause),'-maybe-other-']]]],
+			      Ts),
+            ['match-lambda' | Cls]
+    end.
+
+-endif.
+
+%% to_maybe_else(Es) ->
+%%     case lists:dropwhile(fun (X) -> X =/= 'else' end, Es) of
+%%         [] -> ['lambda',[x],x];
+%%         ['else'|Ts0] ->
+%%             Ts1 = Ts0 ++ [['_',[error,?Q(else_clause)]]],
+%%             Cls = lists:map(fun ([Pat|Body]) -> [[Pat]|Body] end, Ts1),
+%%             ['match-lambda' | Cls]
+%%     end.
 
 %% to_receive(RecClauses, LineNumber, VarTable, State) -> {ErlRec,State}.
 

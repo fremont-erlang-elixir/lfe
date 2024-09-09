@@ -367,6 +367,9 @@ the expression and then be effectively \f[CR]2\f[R].
 (case e
   (pat {{(when e ...)}} ...)
   ... ))
+(maybe
+  ...
+  {{else ...}})
 (receive
   (pat {{(when e ...)}} ... )
   ...
@@ -850,31 +853,6 @@ macrolet:
                \[ga](if (>= ,a ,b) ,a ,b)))
     (m x y)))
 .EE
-.SH Extended cond
-The tests in \f[CR]cond\f[R] are Erlang tests in that they should return
-either \f[CR]true\f[R] or \f[CR]false\f[R].
-If no test succeeds then the \f[CR]cond\f[R] does not generate an
-exception but just returns \f[CR]false\f[R].
-There is a simple catch\-all \[lq]test\[rq] \f[CR]else\f[R] which must
-last and can be used to handle when all tests fail.
-.PP
-Cond has been extended with the extra test \f[CR](?= pat expr)\f[R]
-which tests if the result of \f[CR]expr\f[R] matches the pattern
-\f[CR]pat\f[R].
-If so it binds the variables in \f[CR]pa\f[R]t which can be used in the
-\f[CR]cond\f[R].
-A optional guard is allowed here.
-An example:
-.IP
-.EX
-(cond ((foo x) ...)
-      ((?= (cons x xs) (when (is_atom x)) (bar y))
-       (fubar xs (baz x)))
-      ((?= (tuple \[aq]ok x) (baz y))
-       (zipit x))
-      ...
-      (else \[aq]yay))
-.EE
 .SH Records
 Records are tuples with the record name as first element and the rest of
 the fields in order exactly like \[lq]normal\[rq] Erlang records.
@@ -1120,7 +1098,53 @@ There are also alternate short forms \f[CR]msiz\f[R], \f[CR]mref\f[R],
 \f[CR]mset\f[R], \f[CR]mupd\f[R] and \f[CR]mrem\f[R] based on the
 Maclisp array reference forms.
 They take the same arguments as their longer alternatives.
-.SH List/binary comprehensions
+.SH Core forms
+.SS Cond
+The LFE \f[CR]cond\f[R] is similar to \f[CR]if\f[R] and tests in
+\f[CR]cond\f[R] are Erlang tests in that they should return either
+\f[CR]true\f[R] or \f[CR]false\f[R].
+If no test succeeds then the \f[CR]cond\f[R] does not generate an
+exception but just returns \f[CR]false\f[R].
+There is a simple catch\-all \[lq]test\[rq] \f[CR]else\f[R] which must
+last and can be used to handle the case when all tests fail.
+.PP
+Cond has been extended with the extra test \f[CR](?= pat expr)\f[R]
+which tests if the result of \f[CR]expr\f[R] matches the pattern
+\f[CR]pat\f[R].
+If so it binds the variables in \f[CR]pat\f[R] which can be used in the
+\f[CR]cond\f[R] test body expression.
+A optional guard is allowed here.
+An example:
+.IP
+.EX
+(cond ((foo x) ...)
+      ((?= (cons x xs) (when (is_atom x)) (bar y))
+       (fubar xs (baz x)))
+      ((?= (tuple \[aq]ok x) (baz y))
+       (zipit x))
+      ...
+      (else \[aq]yay))
+.EE
+.SS Maybe
+LFE has an Erlang compatible \f[CR]maybe\f[R].
+It has the same features as the Erlang \f[CR]maybe\f[R] with the
+\f[CR]?=\f[R] operator and \f[CR]else\f[R].
+An example:
+.IP
+.EX
+(maybe
+  (foo g)
+  (?= \[ga]#(ok ,a) (a g))
+  (bar g)
+  ;; (== \[aq]true (>= a 0))
+  (?= \[ga]#(ok ,b) (b g))
+  (+ a b)
+  else
+  (\[aq]error 1 #(got error))
+  (\[aq]wrong 2 #(got wrong))
+  )
+.EE
+.SS List/binary comprehensions
 List/binary comprehensions are supported as macros.
 The syntax for list comprehensions is:
 .IP
@@ -1223,7 +1247,7 @@ Macros, especially record macros, can freely be used inside match specs.
 .PP
 \f[I]CAVEAT\f[R] Some things which are known not to work in the current
 version are andalso, orelse and record updates.
-.SH Query List Comprehensions
+.SS Query List Comprehensions
 LFE supports QLCs for mnesia through the qlc macro.
 It has the same structure as a list comprehension and generates a Query
 Handle in the same way as with \f[CR]qlc:q([...])\f[R].
