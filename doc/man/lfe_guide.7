@@ -1144,6 +1144,14 @@ An example:
   (\[aq]wrong 2 #(got wrong))
   )
 .EE
+.PP
+The maybe body can include \f[CR]?=\f[R] forms which behave in the same
+way as in the Erlang maybe.
+As LFE cannot bind variables in the same way as in Erlang we allow
+\f[CR]let\f[R] in the body to bind variables.
+These variables are only local in the let body so this body is
+\[lq]lifted\[rq] upto the top level maybe body and so can contain
+\f[CR]?=\f[R] forms as well.
 .SS List/binary comprehensions
 List/binary comprehensions are supported as macros.
 The syntax for list comprehensions is:

@@ -1174,6 +1174,7 @@ Erlang ``maybe`` with the ``?=`` operator and ``else``. An example:
   ('wrong 2 #(got wrong))
   )
 ```
+The maybe body can include ``?=`` forms which behave in the same way as in the Erlang maybe. As LFE cannot bind variables in the same way as in Erlang we allow ``let`` in the body to bind variables. These variables are only local in the let body so this body is "lifted" upto the top level maybe body and so can contain ``?=`` forms as well.
 
 ## List/binary comprehensions
 
